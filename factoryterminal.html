@@ -1,0 +1,434 @@
+<html><head><base href="https://asciifactorydefense.io/game"/>
+<title>ASCII Factory Defense</title>
+<style>
+:root {
+  --terminal-green: #33ff33;
+  --bg-dark: #111;
+}
+
+body {
+  background: var(--bg-dark);
+  color: var(--terminal-green);
+  font-family: 'Courier New', monospace;
+  margin: 0;
+  padding: 20px;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.terminal {
+  border: 1px solid var(--terminal-green);
+  height: calc(100vh - 40px);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+}
+
+.output {
+  flex-grow: 1;
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: auto 1fr auto;
+  gap: 10px;
+  white-space: pre;
+  overflow-y: auto;
+}
+
+.status-view {
+  border: 1px solid var(--terminal-green);
+  padding: 10px;
+}
+
+.map-container {
+  display: flex;
+  gap: 20px;
+  justify-content: space-between;
+  font-family: 'Courier New', monospace;
+}
+
+.view-panel {
+  border: 1px solid var(--terminal-green);
+  padding: 10px;
+  flex: 1;
+  font-family: 'Courier New', monospace;
+  letter-spacing: normal;
+  line-height: 1.2;
+  white-space: pre;
+}
+
+.input-line {
+  display: flex;
+  align-items: center;
+  padding: 5px 0;
+}
+
+.prompt {
+  color: var(--terminal-green);
+  margin-right: 10px;
+}
+
+#command-input {
+  background: transparent;
+  border: none;
+  color: var(--terminal-green);
+  font-family: 'Courier New', monospace;
+  font-size: 16px;
+  flex-grow: 1;
+  outline: none;
+}
+
+.map-view {
+  font-size: 14px;
+  line-height: 1;
+}
+
+#terminal-output {
+  height: 150px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  font-size: 14px;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.cursor {
+  display: inline-block;
+  width: 8px;
+  height: 15px;
+  background: var(--terminal-green);
+  animation: blink 1s infinite;
+}
+</style>
+</head>
+<body>
+
+<div class="terminal">
+  <div class="output" id="output">
+    <div class="status-view" id="status-view"></div>
+    <div class="map-container">
+      <div class="view-panel" id="factory-view"></div>
+      <div class="view-panel" id="defense-view"></div>
+    </div>
+    <div class="view-panel" id="terminal-output">Welcome to ASCII Factory Defense
+Type 'build <type> <x> <y>' to build (F/M/G/S for factory, T/H/W/L for defense)
+Type 'start-wave' to begin the next wave</div>
+  </div>
+  <div class="input-line">
+    <span class="prompt">ttd$</span>
+    <input type="text" id="command-input" autofocus>
+    <div class="cursor"></div>
+  </div>
+</div>
+
+<script>
+const output = document.getElementById('output');
+const input = document.getElementById('command-input');
+const statusView = document.getElementById('status-view');
+const factoryView = document.getElementById('factory-view'); 
+const defenseView = document.getElementById('defense-view');
+const terminalOutput = document.getElementById('terminal-output');
+
+const gameState = {
+  resources: {
+    ram: 200,
+    controlPoints: 100,
+    cpu: 50,
+    storage: {
+      current: 500,
+      max: 1000
+    }
+  },
+  factory: {
+    generator: {cost: 100, production: 5},
+    miner: {cost: 150, production: 3},
+    storage: {cost: 200, capacity: 500}
+  },
+  buildings: {
+    basicTower: {cost: 50},
+    homingTower: {cost: 100}, 
+    wall: {cost: 25},
+    laser: {cost: 150}
+  },
+  factoryMap: {
+    width: 16,
+    height: 3,
+    grid: Array(3).fill().map(() => Array(16).fill('·'))
+  },
+  defenseMap: {
+    width: 16,
+    height: 5,
+    grid: Array(5).fill().map(() => Array(16).fill('·'))
+  },
+  viruses: [],
+  wave: 0,
+  waveInProgress: false,
+  tick: 0
+};
+
+// Initialize factory layout
+gameState.factoryMap.grid[0][0] = 'F';
+gameState.factoryMap.grid[0][1] = 'S';
+gameState.factoryMap.grid[1][0] = 'M';
+gameState.factoryMap.grid[1][1] = 'G';
+
+// Initialize defense layout with Factory at 0,0
+gameState.defenseMap.grid[0][0] = 'F';
+gameState.defenseMap.grid[1][0] = 'W';
+gameState.defenseMap.grid[1][1] = 'W';
+gameState.defenseMap.grid[1][2] = 'T';
+gameState.defenseMap.grid[2][2] = 'H';
+gameState.defenseMap.grid[1][14] = 'V';
+gameState.defenseMap.grid[1][15] = 'V';
+gameState.defenseMap.grid[2][14] = 'V';
+gameState.defenseMap.grid[2][15] = 'V';
+
+function manhattanDistance(x1, y1, x2, y2) {
+  return Math.abs(x1 - x2) + Math.abs(y1 - y2);
+}
+
+function findBestMove(x, y, targetX, targetY, map, targetChar) {
+  const moves = [
+    {dx: -1, dy: 0}, {dx: 1, dy: 0},
+    {dx: 0, dy: -1}, {dx: 0, dy: 1}
+  ];
+  
+  let bestMove = null;
+  let bestDistance = Infinity;
+  
+  for (let move of moves) {
+    const newX = x + move.dx;
+    const newY = y + move.dy;
+    
+    if (newX >= 0 && newX < map.width && 
+        newY >= 0 && newY < map.height) {
+      if (map.grid[newY][newX] === '·' || 
+          (newX === targetX && newY === targetY && map.grid[newY][newX] === targetChar)) {
+        const distance = manhattanDistance(newX, newY, targetX, targetY);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestMove = {x: newX, y: newY};
+        }
+      }
+    }
+  }
+  
+  return bestMove;
+}
+
+function findClosestStructure(x, y, map) {
+  let closest = null;
+  let minDistance = Infinity;
+  
+  for (let y2 = 0; y2 < map.height; y2++) {
+    for (let x2 = 0; x2 < map.width; x2++) {
+      if (map.grid[y2][x2] !== '·' && map.grid[y2][x2] !== 'V') {
+        const dist = manhattanDistance(x, y, x2, y2);
+        if (dist < minDistance) {
+          minDistance = dist;
+          closest = {x: x2, y: y2};
+        }
+      }
+    }
+  }
+  
+  return closest;
+}
+
+function moveViruses() {
+  for (let y = 0; y < gameState.defenseMap.height; y++) {
+    for (let x = 0; x < gameState.defenseMap.width; x++) {
+      if (gameState.defenseMap.grid[y][x] === 'V') {
+        const move = findBestMove(x, y, 0, 0, gameState.defenseMap, 'F');
+        if (move) {
+          gameState.defenseMap.grid[y][x] = '·';
+          if (move.x === 0 && move.y === 0) {
+            let placed = false;
+            for (let fy = 0; fy < gameState.factoryMap.height && !placed; fy++) {
+              if (gameState.factoryMap.grid[fy][0] === '·') {
+                gameState.factoryMap.grid[fy][0] = 'V';
+                placed = true;
+              }
+            }
+          } else {
+            gameState.defenseMap.grid[move.y][move.x] = 'V';
+          }
+        }
+      }
+    }
+  }
+  
+  for (let y = 0; y < gameState.factoryMap.height; y++) {
+    for (let x = 0; x < gameState.factoryMap.width; x++) {
+      if (gameState.factoryMap.grid[y][x] === 'V') {
+        const target = findClosestStructure(x, y, gameState.factoryMap);
+        if (target) {
+          const targetChar = gameState.factoryMap.grid[target.y][target.x];
+          const move = findBestMove(x, y, target.x, target.y, gameState.factoryMap, targetChar);
+          if (move) {
+            gameState.factoryMap.grid[y][x] = '·';
+            if (move.x === target.x && move.y === target.y) {
+              gameState.factoryMap.grid[target.y][target.x] = '·';
+            } else {
+              gameState.factoryMap.grid[move.y][move.x] = 'V';
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  updateDisplay();
+  
+  setInterval(() => {
+    gameState.tick++;
+    if (gameState.tick % 10 === 0) {
+      if (gameState.waveInProgress) {
+        moveViruses();
+      }
+      updateResources();
+      updateDisplay();
+    }
+  }, 1000);
+});
+
+function drawMapView(title, buildings, map, legend) {
+  const headerWidth = 36;
+  const gridWidth = map.width * 2 + 2;
+  const contentWidth = Math.max(headerWidth, gridWidth);
+  
+  return `╔${'═'.repeat(contentWidth)}╗
+║${title.padEnd(contentWidth)}║
+║${buildings[0].padEnd(contentWidth)}║
+║${buildings[1].padEnd(contentWidth)}║
+║${' '.repeat(contentWidth)}║
+║${`< Current ${title.split(' ')[0]} Layout >`.padEnd(contentWidth)}║
+║    ${Array.from({length: map.width}, (_, i) => i.toString(16).toUpperCase()).join(' ').padEnd(contentWidth - 4)}║\n` +
+    map.grid.map((row, y) => 
+      `║ ${y.toString().padStart(2)} ${row.map(cell => cell + ' ').join('')}║`
+    ).join('\n') +
+    `\n╚${'═'.repeat(contentWidth)}╝`;
+}
+
+function updateResources() {
+  let generators = 0;
+  let miners = 0;
+  let storage = 1; 
+
+  for (let row of gameState.factoryMap.grid) {
+    for (let cell of row) {
+      if (cell === 'G') generators++;
+      if (cell === 'M') miners++;
+      if (cell === 'S') storage++;
+    }
+  }
+
+  gameState.resources.cpu += generators * gameState.factory.generator.production;
+  gameState.resources.ram += miners * gameState.factory.miner.production;
+  gameState.resources.storage.max = storage * gameState.factory.storage.capacity;
+}
+
+function updateDisplay() {
+  if (statusView) {
+    statusView.textContent = 
+      `Game Status - Wave: ${gameState.wave}
+      Resources: RAM: ${gameState.resources.ram} │ Control Points: ${gameState.resources.controlPoints} │ CPU: ${gameState.resources.cpu} │ Storage: ${gameState.resources.storage.current}/${gameState.resources.storage.max}`;
+  }
+
+  if (factoryView) {
+    factoryView.innerHTML = drawMapView(
+      'FACTORY VIEW',
+      [
+        '🏭 [F] - Factory      ⚡ [G] - Gen',
+        '🔧 [M] - Miner        💾 [S] - Store'
+      ],
+      gameState.factoryMap
+    );
+  }
+
+  if (defenseView) {
+    defenseView.innerHTML = drawMapView(
+      'DEFENSE VIEW',
+      [
+        '🗼 [T] - Basic Tower   🛡️ [W] - Wall',
+        '🎯 [H] - Homing Tower  ⚡ [L] - Laser'
+      ],
+      gameState.defenseMap
+    );
+  }
+}
+
+const commands = {
+  'build': (args) => {
+    const [type, x, y] = args;
+    const xPos = parseInt(x, 16);
+    const yPos = parseInt(y);
+    
+    if ('FMGS'.includes(type)) {
+      if (yPos >= 0 && yPos < gameState.factoryMap.height &&
+          xPos >= 0 && xPos < gameState.factoryMap.width &&
+          gameState.factoryMap.grid[yPos][xPos] === '·') {
+        gameState.factoryMap.grid[yPos][xPos] = type;
+        return `Built ${type} at (${x},${y})`;
+      }
+      return 'Invalid position for factory building';
+    }
+    
+    if ('THWL'.includes(type)) {
+      if (yPos >= 0 && yPos < gameState.defenseMap.height &&
+          xPos >= 0 && xPos < gameState.defenseMap.width &&
+          gameState.defenseMap.grid[yPos][xPos] === '·') {
+        gameState.defenseMap.grid[yPos][xPos] = type;
+        return `Built ${type} at (${x},${y})`;
+      }
+      return 'Invalid position for defense building';
+    }
+    
+    return 'Invalid building type';
+  },
+  
+  'start-wave': () => {
+    if (gameState.waveInProgress) {
+      return 'Wave already in progress';
+    }
+    
+    gameState.wave++;
+    gameState.waveInProgress = true;
+    
+    const virusCount = Math.min(3 + gameState.wave, 10);
+    for (let i = 0; i < virusCount; i++) {
+      const y = Math.floor(Math.random() * gameState.defenseMap.height);
+      gameState.defenseMap.grid[y][gameState.defenseMap.width-1] = 'V';
+    }
+    
+    return `Wave ${gameState.wave} started!`;
+  }
+};
+
+input.addEventListener('keypress', (e) => {
+  if (e.key === 'Enter') {
+    const command = input.value.trim();
+    const [cmd, ...args] = command.split(' ');
+    
+    if (commands[cmd]) {
+      const result = commands[cmd](args);
+      terminalOutput.textContent += `\n\nttd$ ${command}\n${result}`;
+      updateDisplay();
+    } else {
+      terminalOutput.textContent += `\n\nttd$ ${command}\nUnknown command. Available commands: build, start-wave`;
+    }
+    
+    input.value = '';
+    terminalOutput.scrollTop = terminalOutput.scrollHeight;
+  }
+});
+
+document.querySelector('.terminal').addEventListener('click', () => {
+  input.focus();
+});
+</script>
+</body></html>
